@@ -1,12 +1,21 @@
 <?php
-$host = 'localhost';
-$user = 'root';
-$pass = '';
-$db = 'kasir_db';
 
-$conn = mysqli_connect($host, $user, $pass, $db);
+$host = "localhost";
+$user = "root";
+$pass = "";
+$db   = "kasir_db";
 
-if (!$conn) {
-    die(mysqli_connect_error());
+$conn = new mysqli(
+    $host,
+    $user,
+    $pass,
+    $db
+);
+
+if ($conn->connect_error) {
+    die("Koneksi database gagal: " . $conn->connect_error);
 }
+
+$conn->set_charset("utf8mb4");
+
 ?>

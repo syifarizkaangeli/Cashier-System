@@ -1,37 +1,58 @@
 <?php
+
 session_start();
-include 'database.php';
 
-if(isset($_POST['username'])){
-    $u=$_POST['username'];
-    $p=$_POST['password'];
+require_once "database.php";
 
-    $d=mysqli_fetch_assoc(mysqli_query($conn,"SELECT * FROM admin WHERE username='$u'"));
+$error = "";
 
-    if($d && password_verify($p, $d['password'])){
-        $_SESSION['admin']=$u;
-        header('location: index.php'); exit;
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+
+    $username = trim($_POST['username'] ?? '');
+    $password = $_POST['password'] ?? '';
+
+    if ($username === '' || $password === '') {
+
+        $error = "Username dan password wajib diisi.";
+
+    } else {
+
+        $stmt = mysqli_prepare(
+            $conn,
+            "SELECT id_admin, username, password
+             FROM admin
+             WHERE username = ?
+             LIMIT 1"
+        );
+
+        mysqli_stmt_bind_param(
+            $stmt,
+            "s",
+            $username
+        );
+
+        mysqli_stmt_execute($stmt);
+
+        $result = mysqli_stmt_get_result($stmt);
+
+        $admin = mysqli_fetch_assoc($result);
+
+        mysqli_stmt_close($stmt);
+
+
+        if ($admin && password_verify($password, $admin['password'])) {
+
+            $_SESSION['admin_id'] = $admin['id_admin'];
+            $_SESSION['admin_username'] = $admin['username'];
+
+            header("Location: index.php");
+            exit;
+
+        } else {
+
+            $error = "Username atau password salah.";
+        }
     }
 }
 
-
 ?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login Kasir</title>
-</head>
-<body class="d-flex justify-content-center align-items-center vh-100 bg-light">
-    <link rel="stylesheet" href="bootstrap-5.3.8-dist\css\bootstrap.min.css">
-    <div class="card p-4 shadow" style="width:320px">
-        <h5 class="text-center mb-3">Login Kasir</h5>
-        <form method="post">
-            <input name="username" placeholder="Username" class="form-control mb-2">
-            <input name="password" type="password" placeholder="Password" class="form-control mb-2">
-            <button name="login" class="btn btn-dark w-100">Login</button>
-        </form>
-    </div>
-</body>
-</html>

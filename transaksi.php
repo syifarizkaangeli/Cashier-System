@@ -1,263 +1,858 @@
 <?php
-session_start();
-include "database.php";
-include "navbar.php";
 
-if (!isset($_SESSION['admin'])) {
+session_start();
+require_once "database.php";
+
+/*
+|--------------------------------------------------------------------------
+| CEK LOGIN
+|--------------------------------------------------------------------------
+*/
+
+if (!isset($_SESSION['admin_id'])) {
     header("Location: login.php");
     exit;
 }
 
-if (!isset($_SESSION['cart'])) {
-    $_SESSION['cart'] = [];
+
+/*
+|--------------------------------------------------------------------------
+| HELPER
+|--------------------------------------------------------------------------
+*/
+
+function e($value)
+{
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-if (isset($_GET['add'])) {
-    $id_barang = (int)$_GET['add'];
 
-    $q = mysqli_query($conn, "SELECT stok FROM barang WHERE id_barang=$id_barang");
-    $b = mysqli_fetch_assoc($q);
+/*
+|--------------------------------------------------------------------------
+| VARIABLE
+|--------------------------------------------------------------------------
+*/
 
-    if ($b) {
-        $stok = $b['stok'];
-        $qty_sekarang = $_SESSION['cart'][$id_barang] ?? 0;
+$error = "";
+$success = "";
 
-        if ($qty_sekarang < $stok) {
-            $_SESSION['cart'][$id_barang] = $qty_sekarang + 1;
-        }
-    }
-    header("Location: transaksi.php");
-    exit;
-}
 
-if (isset($_POST['update_qty'])) {
-    $id_barang = (int)$_POST['id_barang'];
-    $qty       = (int)$_POST['qty'];
+/*
+|--------------------------------------------------------------------------
+| SIMPAN TRANSAKSI
+|--------------------------------------------------------------------------
+*/
 
-    $q = mysqli_query($conn, "SELECT stok FROM barang WHERE id_barang=$id_barang");
-    $b = mysqli_fetch_assoc($q);
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['simpan'])) {
 
-    if ($b) {
-        if ($qty <= 0) {
-            unset($_SESSION['cart'][$id_barang]);
-        } elseif ($qty > $b['stok']) {
-            $_SESSION['cart'][$id_barang] = $b['stok'];
-        } else {
-            $_SESSION['cart'][$id_barang] = $qty;
-        }
-    }
-    header("Location: transaksi.php");
-    exit;
-}
+    $id_pelanggan = trim($_POST['id_pelanggan'] ?? '');
+    $id_barang    = trim($_POST['id_barang'] ?? '');
+    $jumlah       = trim($_POST['jumlah'] ?? '');
 
-$kembalian = null;
-$error_bayar = null;
 
-if (isset($_POST['proses_bayar'])) {
+    /*
+    |--------------------------------------------------------------------------
+    | VALIDASI INPUT
+    |--------------------------------------------------------------------------
+    */
 
-    $id_pelanggan = (int)$_POST['id_pelanggan'];
-    $uang_bayar   = (int)$_POST['bayar'];
-    $total = 0;
+    if ($id_pelanggan === '' || !ctype_digit($id_pelanggan)) {
 
-    foreach ($_SESSION['cart'] as $id_barang => $qty) {
-        $q = mysqli_query($conn, "
-            SELECT harga, stok
-            FROM barang
-            WHERE id_barang=$id_barang
-        ");
-        $b = mysqli_fetch_assoc($q);
+        $error = "Silakan pilih pelanggan.";
 
-        if ($qty > $b['stok']) {
-            $error_bayar = "Stok tidak cukup";
-            break;
-        }
+    } elseif ($id_barang === '' || !ctype_digit($id_barang)) {
 
-        $total += $b['harga'] * $qty;
+        $error = "Silakan pilih barang.";
+
+    } elseif ($jumlah === '' || !ctype_digit($jumlah)) {
+
+        $error = "Jumlah barang harus berupa angka.";
+
+    } elseif ((int) $jumlah <= 0) {
+
+        $error = "Jumlah barang harus lebih dari 0.";
     }
 
-    if (!$error_bayar) {
-        if ($uang_bayar < $total) {
-            $error_bayar = "Uang bayar kurang";
-        } else {
 
-            foreach ($_SESSION['cart'] as $id_barang => $qty) {
+    /*
+    |--------------------------------------------------------------------------
+    | PROSES TRANSAKSI
+    |--------------------------------------------------------------------------
+    */
 
-                $q = mysqli_query($conn, "
-                    SELECT harga
-                    FROM barang
-                    WHERE id_barang=$id_barang
-                ");
-                $b = mysqli_fetch_assoc($q);
+    if ($error === '') {
 
-                $harga    = $b['harga'];
-                $subtotal = $harga * $qty;
+        $idPelangganValue = (int) $id_pelanggan;
+        $idBarangValue    = (int) $id_barang;
+        $jumlahValue      = (int) $jumlah;
 
-                mysqli_query($conn, "
-                    INSERT INTO penjualan
-                    (id_pelanggan, id_barang, jumlah, harga, subtotal, total_harga, waktu)
-                    VALUES
-                    ($id_pelanggan, $id_barang, $qty, $harga, $subtotal, $total, NOW())
-                ");
 
-                mysqli_query($conn, "
-                    UPDATE barang
-                    SET stok = stok - $qty
-                    WHERE id_barang = $id_barang
-                ");
+        /*
+        |--------------------------------------------------------------------------
+        | MULAI TRANSACTION DATABASE
+        |--------------------------------------------------------------------------
+        */
+
+        mysqli_begin_transaction($conn);
+
+        try {
+
+            /*
+            |--------------------------------------------------------------------------
+            | CEK PELANGGAN
+            |--------------------------------------------------------------------------
+            */
+
+            $stmtPelanggan = mysqli_prepare(
+                $conn,
+                "SELECT id_pelanggan
+                 FROM pelanggan
+                 WHERE id_pelanggan = ?
+                 LIMIT 1"
+            );
+
+            mysqli_stmt_bind_param(
+                $stmtPelanggan,
+                "i",
+                $idPelangganValue
+            );
+
+            mysqli_stmt_execute($stmtPelanggan);
+
+            $resultPelanggan = mysqli_stmt_get_result($stmtPelanggan);
+
+            if (mysqli_num_rows($resultPelanggan) !== 1) {
+
+                throw new Exception("Data pelanggan tidak ditemukan.");
             }
 
-            $kembalian = $uang_bayar - $total;
-            unset($_SESSION['cart']);
+            mysqli_stmt_close($stmtPelanggan);
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | AMBIL BARANG + KUNCI ROW
+            |--------------------------------------------------------------------------
+            |
+            | FOR UPDATE mencegah stok berubah oleh transaksi lain
+            | selama proses transaksi berlangsung.
+            |
+            */
+
+            $stmtBarang = mysqli_prepare(
+                $conn,
+                "SELECT
+                    id_barang,
+                    nama_barang,
+                    harga,
+                    stok
+                 FROM barang
+                 WHERE id_barang = ?
+                 FOR UPDATE"
+            );
+
+            mysqli_stmt_bind_param(
+                $stmtBarang,
+                "i",
+                $idBarangValue
+            );
+
+            mysqli_stmt_execute($stmtBarang);
+
+            $resultBarang = mysqli_stmt_get_result($stmtBarang);
+
+            $barang = mysqli_fetch_assoc($resultBarang);
+
+            mysqli_stmt_close($stmtBarang);
+
+
+            if (!$barang) {
+
+                throw new Exception("Barang tidak ditemukan.");
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | CEK STOK
+            |--------------------------------------------------------------------------
+            */
+
+            $stokSekarang = (int) $barang['stok'];
+
+            if ($jumlahValue > $stokSekarang) {
+
+                throw new Exception(
+                    "Stok {$barang['nama_barang']} tidak mencukupi. " .
+                    "Stok tersedia: {$stokSekarang}."
+                );
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | HITUNG HARGA
+            |--------------------------------------------------------------------------
+            */
+
+            $harga = (float) $barang['harga'];
+
+            $subtotal = $harga * $jumlahValue;
+
+            $totalHarga = $subtotal;
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | SIMPAN PENJUALAN
+            |--------------------------------------------------------------------------
+            */
+
+            $stmtPenjualan = mysqli_prepare(
+                $conn,
+                "INSERT INTO penjualan
+                (
+                    id_pelanggan,
+                    id_barang,
+                    jumlah,
+                    harga,
+                    subtotal,
+                    total_harga
+                )
+                VALUES (?, ?, ?, ?, ?, ?)"
+            );
+
+            mysqli_stmt_bind_param(
+                $stmtPenjualan,
+                "iiiddd",
+                $idPelangganValue,
+                $idBarangValue,
+                $jumlahValue,
+                $harga,
+                $subtotal,
+                $totalHarga
+            );
+
+            if (!mysqli_stmt_execute($stmtPenjualan)) {
+
+                throw new Exception(
+                    "Gagal menyimpan transaksi."
+                );
+            }
+
+            mysqli_stmt_close($stmtPenjualan);
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | KURANGI STOK
+            |--------------------------------------------------------------------------
+            */
+
+            $stokBaru = $stokSekarang - $jumlahValue;
+
+            $stmtStok = mysqli_prepare(
+                $conn,
+                "UPDATE barang
+                 SET stok = ?
+                 WHERE id_barang = ?"
+            );
+
+            mysqli_stmt_bind_param(
+                $stmtStok,
+                "ii",
+                $stokBaru,
+                $idBarangValue
+            );
+
+            if (!mysqli_stmt_execute($stmtStok)) {
+
+                throw new Exception(
+                    "Gagal memperbarui stok barang."
+                );
+            }
+
+            mysqli_stmt_close($stmtStok);
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | COMMIT
+            |--------------------------------------------------------------------------
+            */
+
+            mysqli_commit($conn);
+
+            header("Location: transaksi.php?success=1");
+            exit;
+
+        } catch (Throwable $e) {
+
+            /*
+            |--------------------------------------------------------------------------
+            | ROLLBACK
+            |--------------------------------------------------------------------------
+            */
+
+            mysqli_rollback($conn);
+
+            $error = $e->getMessage();
         }
     }
 }
 
-$search = $_GET['search'] ?? '';
-$search_safe = mysqli_real_escape_string($conn, $search);
 
-$barang = mysqli_query($conn, "
-    SELECT *
-    FROM barang
-    WHERE nama_barang LIKE '%$search_safe%'
-");
+/*
+|--------------------------------------------------------------------------
+| PESAN SUKSES
+|--------------------------------------------------------------------------
+*/
+
+if (isset($_GET['success']) && $_GET['success'] === '1') {
+
+    $success = "Transaksi berhasil disimpan dan stok telah diperbarui.";
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| AMBIL DATA PELANGGAN
+|--------------------------------------------------------------------------
+*/
+
+$resultPelanggan = mysqli_query(
+    $conn,
+    "SELECT
+        id_pelanggan,
+        nama_pelanggan
+     FROM pelanggan
+     ORDER BY nama_pelanggan ASC"
+);
+
+
+/*
+|--------------------------------------------------------------------------
+| AMBIL DATA BARANG
+|--------------------------------------------------------------------------
+*/
+
+$resultBarang = mysqli_query(
+    $conn,
+    "SELECT
+        id_barang,
+        nama_barang,
+        harga,
+        stok
+     FROM barang
+     ORDER BY nama_barang ASC"
+);
+
 ?>
+
 <!DOCTYPE html>
-<html>
+<html lang="id">
+
 <head>
-    <title>Transaksi</title>
-    <link rel="stylesheet" href="bootstrap-5.3.8-dist\css\bootstrap.min.css">
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Transaksi - Web Kasir</title>
+
+    <link
+        rel="stylesheet"
+        href="bootstrap-5.3.8-dist/css/bootstrap.min.css"
+    >
+
+    <style>
+
+        body {
+            background: #f5f6f8;
+        }
+
+        .page-title {
+            font-weight: 700;
+        }
+
+        .card {
+            border: none;
+            border-radius: 12px;
+        }
+
+        .form-control,
+        .form-select {
+            min-height: 44px;
+        }
+
+        .btn {
+            border-radius: 7px;
+        }
+
+        .summary-box {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 16px;
+        }
+
+        .total-value {
+            font-size: 1.6rem;
+            font-weight: 700;
+        }
+
+        .stock-info {
+            font-size: 0.9rem;
+        }
+
+        @media (max-width: 767.98px) {
+
+            .container {
+                padding-left: 14px;
+                padding-right: 14px;
+            }
+
+            .page-title {
+                font-size: 1.4rem;
+            }
+
+            .total-value {
+                font-size: 1.35rem;
+            }
+
+        }
+
+    </style>
+
 </head>
+
+
 <body>
 
-<div class="container mt-3">
-<div class="row">
 
-<!-- DAFTAR BARANG -->
-<div class="col-md-7">
-    <h5>Daftar Barang</h5>
+<?php include "navbar.php"; ?>
 
-    <form method="GET" class="mb-2">
-        <input type="text" name="search" class="form-control"
-               placeholder="Cari barang"
-               value="<?= htmlspecialchars($search); ?>">
-    </form>
 
-    <table class="table table-bordered table-sm">
-        <thead class="table-secondary">
-        <tr>
-            <th>Nama</th>
-            <th>Stok</th>
-            <th>Harga</th>
-            <th></th>
-        </tr>
-        </thead>
-        <tbody>
-        <?php while ($b = mysqli_fetch_assoc($barang)) { ?>
-        <tr>
-            <td><?= $b['nama_barang']; ?></td>
-            <td><?= $b['stok']; ?></td>
-            <td>Rp <?= number_format($b['harga']); ?></td>
-            <td>
-                <a href="?add=<?= $b['id_barang']; ?>" class="btn btn-sm btn-success">
-                    Beli
-                </a>
-            </td>
-        </tr>
-        <?php } ?>
-        </tbody>
-    </table>
-</div>
+<div class="container py-4">
 
-<!-- TRANSAKSI -->
-<div class="col-md-5">
-    <h5>Transaksi</h5>
 
-    <table class="table table-bordered table-sm">
-        <thead class="table-secondary">
-        <tr>
-            <th>Barang</th>
-            <th width="120">Qty</th>
-            <th>Subtotal</th>
-        </tr>
-        </thead>
-        <tbody>
-        <?php
-        $total_view = 0;
-        if (!empty($_SESSION['cart'])) {
-            foreach ($_SESSION['cart'] as $id_barang => $qty) {
-                $q = mysqli_query($conn, "
-                    SELECT *
-                    FROM barang
-                    WHERE id_barang=$id_barang
-                ");
-                $item = mysqli_fetch_assoc($q);
-                $sub = $item['harga'] * $qty;
-                $total_view += $sub;
-        ?>
-        <tr>
-            <td><?= $item['nama_barang']; ?></td>
-            <td>
-                <form method="POST" class="d-flex">
-                    <input type="hidden" name="id_barang" value="<?= $id_barang; ?>">
-                    <input type="number" name="qty" min="0"
-                           value="<?= $qty; ?>"
-                           class="form-control form-control-sm">
-                    <button name="update_qty"
-                            class="btn btn-sm btn-secondary ms-1">✓</button>
-                </form>
-            </td>
-            <td>Rp <?= number_format($sub); ?></td>
-        </tr>
-        <?php
-            }
-        } else {
-            echo "<tr><td colspan='3' class='text-center'>Belum ada transaksi</td></tr>";
-        }
-        ?>
-        </tbody>
-        <tfoot>
-        <tr>
-            <th colspan="2">Total</th>
-            <th>Rp <?= number_format($total_view); ?></th>
-        </tr>
-        </tfoot>
-    </table>
+    <!-- HEADER -->
 
-    <form method="POST">
-        <select name="id_pelanggan" class="form-control mb-2" required>
-            <option value="">-- Pilih Pelanggan --</option>
-            <?php
-            $plg = mysqli_query($conn, "SELECT * FROM pelanggan");
-            while ($p = mysqli_fetch_assoc($plg)) {
-                echo "<option value='{$p['id_pelanggan']}'>
-                        {$p['nama_pelanggan']} - {$p['no_hp']}
-                      </option>";
-            }
-            ?>
-        </select>
+    <div class="mb-4">
 
-        <input type="number" name="bayar" class="form-control mb-2"
-               placeholder="Uang Bayar" required>
+        <h2 class="page-title mb-1">
+            Transaksi Penjualan
+        </h2>
 
-        <button name="proses_bayar"
-                class="btn btn-primary w-100"
-                <?= empty($_SESSION['cart']) ? 'disabled' : ''; ?>>
-            Bayar
-        </button>
-    </form>
+        <p class="text-muted mb-0">
+            Buat transaksi penjualan dan perbarui stok secara otomatis.
+        </p>
 
-    <?php if ($error_bayar) { ?>
-        <div class="alert alert-danger mt-2"><?= $error_bayar; ?></div>
-    <?php } ?>
+    </div>
 
-    <?php if ($kembalian !== null) { ?>
-        <div class="alert alert-success mt-2">
-            Kembalian: Rp <?= number_format($kembalian); ?>
+
+    <!-- ERROR -->
+
+    <?php if ($error !== ''): ?>
+
+        <div class="alert alert-danger alert-dismissible fade show">
+
+            <?= e($error); ?>
+
+            <button
+                type="button"
+                class="btn-close"
+                data-bs-dismiss="alert"
+            ></button>
+
         </div>
-    <?php } ?>
-</div>
+
+    <?php endif; ?>
+
+
+    <!-- SUCCESS -->
+
+    <?php if ($success !== ''): ?>
+
+        <div class="alert alert-success alert-dismissible fade show">
+
+            <?= e($success); ?>
+
+            <button
+                type="button"
+                class="btn-close"
+                data-bs-dismiss="alert"
+            ></button>
+
+        </div>
+
+    <?php endif; ?>
+
+
+    <!-- FORM TRANSAKSI -->
+
+    <div class="card shadow-sm">
+
+        <div class="card-body p-4">
+
+            <h5 class="fw-bold mb-4">
+                Form Transaksi
+            </h5>
+
+
+            <form method="POST">
+
+
+                <div class="row g-4">
+
+
+                    <!-- PELANGGAN -->
+
+                    <div class="col-12 col-md-6">
+
+                        <label
+                            for="id_pelanggan"
+                            class="form-label"
+                        >
+                            Pelanggan
+                        </label>
+
+                        <select
+                            name="id_pelanggan"
+                            id="id_pelanggan"
+                            class="form-select"
+                            required
+                        >
+
+                            <option value="">
+                                -- Pilih Pelanggan --
+                            </option>
+
+
+                            <?php while ($pelanggan = mysqli_fetch_assoc($resultPelanggan)): ?>
+
+                                <option
+                                    value="<?= e($pelanggan['id_pelanggan']); ?>"
+                                    <?= (
+                                        isset($_POST['id_pelanggan']) &&
+                                        $_POST['id_pelanggan'] == $pelanggan['id_pelanggan']
+                                    )
+                                        ? 'selected'
+                                        : '';
+                                    ?>
+                                >
+
+                                    <?= e($pelanggan['nama_pelanggan']); ?>
+
+                                </option>
+
+                            <?php endwhile; ?>
+
+                        </select>
+
+                    </div>
+
+
+                    <!-- BARANG -->
+
+                    <div class="col-12 col-md-6">
+
+                        <label
+                            for="id_barang"
+                            class="form-label"
+                        >
+                            Barang
+                        </label>
+
+                        <select
+                            name="id_barang"
+                            id="id_barang"
+                            class="form-select"
+                            required
+                        >
+
+                            <option value="">
+                                -- Pilih Barang --
+                            </option>
+
+
+                            <?php while ($barang = mysqli_fetch_assoc($resultBarang)): ?>
+
+                                <option
+                                    value="<?= e($barang['id_barang']); ?>"
+                                    data-harga="<?= e($barang['harga']); ?>"
+                                    data-stok="<?= e($barang['stok']); ?>"
+                                    <?= (
+                                        isset($_POST['id_barang']) &&
+                                        $_POST['id_barang'] == $barang['id_barang']
+                                    )
+                                        ? 'selected'
+                                        : '';
+                                    ?>
+                                >
+
+                                    <?= e($barang['nama_barang']); ?>
+
+                                    -
+                                    Rp <?= number_format(
+                                        (float) $barang['harga'],
+                                        0,
+                                        ',',
+                                        '.'
+                                    ); ?>
+
+                                </option>
+
+                            <?php endwhile; ?>
+
+                        </select>
+
+
+                        <div
+                            id="stockInfo"
+                            class="stock-info text-muted mt-2"
+                        >
+                            Pilih barang untuk melihat stok.
+                        </div>
+
+                    </div>
+
+
+                    <!-- JUMLAH -->
+
+                    <div class="col-12 col-md-4">
+
+                        <label
+                            for="jumlah"
+                            class="form-label"
+                        >
+                            Jumlah
+                        </label>
+
+                        <input
+                            type="number"
+                            name="jumlah"
+                            id="jumlah"
+                            class="form-control"
+                            min="1"
+                            value="<?= e($_POST['jumlah'] ?? '1'); ?>"
+                            required
+                        >
+
+                    </div>
+
+
+                    <!-- HARGA -->
+
+                    <div class="col-12 col-md-4">
+
+                        <label
+                            class="form-label"
+                        >
+                            Harga Satuan
+                        </label>
+
+                        <div class="summary-box">
+
+                            <div
+                                id="hargaTampil"
+                                class="fw-semibold"
+                            >
+                                Rp 0
+                            </div>
+
+                        </div>
+
+                    </div>
+
+
+                    <!-- TOTAL -->
+
+                    <div class="col-12 col-md-4">
+
+                        <label
+                            class="form-label"
+                        >
+                            Total
+                        </label>
+
+                        <div class="summary-box">
+
+                            <div
+                                id="totalTampil"
+                                class="total-value text-success"
+                            >
+                                Rp 0
+                            </div>
+
+                        </div>
+
+                    </div>
+
+
+                    <!-- BUTTON -->
+
+                    <div class="col-12">
+
+                        <hr>
+
+
+                        <div class="d-flex flex-column flex-sm-row gap-2">
+
+                            <button
+                                type="submit"
+                                name="simpan"
+                                class="btn btn-success"
+                            >
+                                Simpan Transaksi
+                            </button>
+
+
+                            <a
+                                href="index.php"
+                                class="btn btn-secondary"
+                            >
+                                Batal
+                            </a>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+            </form>
+
+        </div>
+
+    </div>
+
 
 </div>
-</div>
+
+
+<script
+    src="bootstrap-5.3.8-dist/js/bootstrap.bundle.min.js"
+></script>
+
+
+<script>
+
+const barangSelect = document.getElementById("id_barang");
+const jumlahInput = document.getElementById("jumlah");
+
+const hargaTampil = document.getElementById("hargaTampil");
+const totalTampil = document.getElementById("totalTampil");
+const stockInfo = document.getElementById("stockInfo");
+
+
+function formatRupiah(value) {
+
+    return new Intl.NumberFormat(
+        "id-ID"
+    ).format(value);
+
+}
+
+
+function updateTransaksi() {
+
+    const selectedOption =
+        barangSelect.options[
+            barangSelect.selectedIndex
+        ];
+
+
+    if (!selectedOption || !selectedOption.value) {
+
+        hargaTampil.textContent = "Rp 0";
+        totalTampil.textContent = "Rp 0";
+
+        stockInfo.textContent =
+            "Pilih barang untuk melihat stok.";
+
+        stockInfo.className =
+            "stock-info text-muted mt-2";
+
+        return;
+    }
+
+
+    const harga =
+        parseFloat(
+            selectedOption.dataset.harga || 0
+        );
+
+
+    const stok =
+        parseInt(
+            selectedOption.dataset.stok || 0
+        );
+
+
+    const jumlah =
+        parseInt(
+            jumlahInput.value || 0
+        );
+
+
+    const total =
+        harga * jumlah;
+
+
+    hargaTampil.textContent =
+        "Rp " + formatRupiah(harga);
+
+
+    totalTampil.textContent =
+        "Rp " + formatRupiah(total);
+
+
+    stockInfo.textContent =
+        "Stok tersedia: " + stok;
+
+
+    if (stok <= 5) {
+
+        stockInfo.className =
+            "stock-info text-danger fw-semibold mt-2";
+
+    } else {
+
+        stockInfo.className =
+            "stock-info text-success mt-2";
+    }
+
+
+    jumlahInput.max = stok > 0 ? stok : 1;
+}
+
+
+barangSelect.addEventListener(
+    "change",
+    updateTransaksi
+);
+
+
+jumlahInput.addEventListener(
+    "input",
+    updateTransaksi
+);
+
+
+updateTransaksi();
+
+</script>
+
+
 </body>
+
 </html>
+
+<?php
+
+mysqli_close($conn);
+
+?>
