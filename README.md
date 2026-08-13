@@ -1,4 +1,4 @@
-# Cashier and Inventory Management System
+# Cashier Management System
 
 A web-based cashier and inventory management system designed to help manage customers, products, stock, sales transactions, transaction history, and printable receipts.
 
@@ -106,7 +106,7 @@ The `penjualan` table connects customers and products through:
 ## 📁 Project Structure
 
 ```text
-Cashier-and-Inventory-System/
+Cashier-System/
 │
 ├── index.php
 ├── login.php
@@ -145,7 +145,7 @@ Download and install XAMPP with:
 Place the project inside the XAMPP `htdocs` directory:
 
 ```text
-C:\xampp\htdocs\Cashier-and-Inventory-System
+C:\xampp\htdocs\Cashier-System
 ```
 
 ### 3. Start XAMPP
@@ -203,7 +203,7 @@ $conn->set_charset("utf8mb4");
 Open your browser and visit:
 
 ```text
-http://localhost/Cashier-and-Inventory-System/
+http://localhost/Cashier-System/
 ```
 
 ## 🔑 Default Admin Account
